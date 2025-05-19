@@ -1,0 +1,277 @@
+#define BLYNK_TEMPLATE_ID "TMPL3y1MYrA1R"
+#define BLYNK_TEMPLATE_NAME "Air Quality Monitoring"
+#define BLYNK_AUTH_TOKEN "Yym-cStz-2_OY-DxHfvbfuXm2HEhd8W_"
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <time.h>
+#include <BlynkSimpleEsp32.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include <LiquidCrystal_I2C.h>
+#include <Wire.h>
+#include <Adafruit_BMP085.h>
+#include <hd44780.h>
+#include <hd44780ioClass/hd44780_I2Cexp.h>
+
+hd44780_I2Cexp lcd;
+
+// Blynk credentials
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "project";  
+char pass[] = "project2";  
+
+BlynkTimer timer;
+
+// Pin assignments
+int gasPin = 32;             
+#define DHTPIN 4             
+#define DHTTYPE DHT11        
+DHT dht(DHTPIN, DHTTYPE);   
+Adafruit_BMP085 bmp;        
+
+// Custom degree symbol for LCD
+byte degree_symbol[8] = {
+    0b00111, 0b00101, 0b00111, 
+    0b00000, 0b00000, 0b00000, 
+    0b00000, 0b00000
+};
+// Define breakpoints for pollutants (in ppm)
+struct AQIBreakpoint {
+    float Clow, Chigh; // Concentration range (in ppm)
+    int Ilow, Ihigh;   // AQI range
+};
+// Function to read sensors and send data
+// Calibration constants 
+const float CO2_SLOPE = 0.1; //  ppm per ADC unit
+const float CO2_INTERCEPT = 0.0;
+
+const float SO2_SLOPE = 0.02;
+const float SO2_INTERCEPT = 0.0;
+
+const float CO_SLOPE = 0.01;
+const float CO_INTERCEPT = 0.0;
+
+const float NH3_SLOPE = 0.015;
+const float NH3_INTERCEPT = 0.0;
+
+const float BENZENE_SLOPE = 0.005;
+const float BENZENE_INTERCEPT = 0.0;
+
+float calculatePPM(int gasValue, float slope, float intercept) {
+    return (gasValue * slope) + intercept;
+}
+
+// Breakpoint table for SO₂ (ppm values)
+AQIBreakpoint SO2_Breakpoints[] = {
+    {0.0, 0.020, 0, 50},    // 0–0.020 ppm corresponds to 0–50 AQI
+    {0.021, 0.040, 51, 100},
+    {0.041, 0.100, 101, 200},
+    {0.101, 0.200, 201, 300}
+};
+
+// Breakpoint table for NH₃ (ppm values)
+AQIBreakpoint NH3_Breakpoints[] = {
+    {0.0, 0.200, 0, 50},    // 0–0.200 ppm corresponds to 0–50 AQI
+    {0.201, 0.400, 51, 100},
+    {0.401, 1.000, 101, 200}
+};
+
+// Breakpoint table for Benzene (ppm values)
+AQIBreakpoint Benzene_Breakpoints[] = {
+    {0.0, 0.003, 0, 50},    // 0–0.003 ppm corresponds to 0–50 AQI
+    {0.004, 0.017, 51, 100},
+    {0.018, 0.030, 101, 200}
+};
+
+// Breakpoint table for CO₂ (ppm values)
+AQIBreakpoint CO2_Breakpoints[] = {
+    {0.0, 400.0, 0, 50},    // 0–400 ppm corresponds to 0–50 AQI
+    {401.0, 1000.0, 51, 100},
+    {1001.0, 2000.0, 101, 200}
+};
+
+// Function to calculate AQI for a pollutant
+int calculateAQI(float concentration, AQIBreakpoint breakpoints[], int size) {
+    for (int i = 0; i < size; i++) {
+        if (concentration >= breakpoints[i].Clow && concentration <= breakpoints[i].Chigh) {
+            return (int)((breakpoints[i].Ihigh - breakpoints[i].Ilow) / (breakpoints[i].Chigh - breakpoints[i].Clow) * 
+                         (concentration - breakpoints[i].Clow) + breakpoints[i].Ilow);
+        }
+    }
+    // Return -1 if no valid range is found
+    return -1;
+}
+
+// NTP Server configuration
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 19800; // Offset for IST (GMT+5:30)
+const int daylightOffset_sec = 0;
+
+// Function to get current date and time
+String getCurrentTime() {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        Serial.println("Failed to obtain time");
+        return "N/A";
+    }
+    char timeStr[20];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    return String(timeStr);
+}
+
+void sendSensorData() {
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    float pressure = bmp.readPressure() / 100.0;
+    int gasValue = analogRead(gasPin);
+
+    // Apply calibration formulas
+    float co2_ppm = calculatePPM(gasValue, CO2_SLOPE, CO2_INTERCEPT);
+    float so2_ppm = calculatePPM(gasValue, SO2_SLOPE, SO2_INTERCEPT);
+    float co_ppm = calculatePPM(gasValue, CO_SLOPE, CO_INTERCEPT);
+    float nh3_ppm = calculatePPM(gasValue, NH3_SLOPE, NH3_INTERCEPT);
+    float benzene_ppm = calculatePPM(gasValue, BENZENE_SLOPE, BENZENE_INTERCEPT);
+
+    // Get current date and time
+    String currentTime = getCurrentTime();
+
+    // Send data to Blynk
+    Blynk.virtualWrite(V0, temperature);
+    Blynk.virtualWrite(V1, humidity);
+    Blynk.virtualWrite(V2, gasValue);
+    Blynk.virtualWrite(V3, co2_ppm);
+    Blynk.virtualWrite(V4, pressure);
+    Blynk.virtualWrite(V5, so2_ppm);
+    Blynk.virtualWrite(V6, co_ppm);
+    Blynk.virtualWrite(V7, nh3_ppm);
+    Blynk.virtualWrite(V8, benzene_ppm);
+    Blynk.virtualWrite(V9, currentTime); // Send time to Blynk
+
+    // Display data on LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Time:");
+    lcd.print(currentTime.substring(11, 19)); // Display only HH:MM:SS
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("CO2: ");
+    lcd.print(co2_ppm, 1);
+    lcd.print(" ppm");
+
+    lcd.setCursor(0, 1);
+    lcd.print("SO2: ");
+    lcd.print(so2_ppm, 1);
+    lcd.print(" ppm");
+    delay(3000);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("CO: ");
+    lcd.print(co_ppm, 1);
+    lcd.print(" ppm");
+
+    lcd.setCursor(0, 1);
+    lcd.print("NH3: ");
+    lcd.print(nh3_ppm, 1);
+    lcd.print(" ppm");
+    delay(3000);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Benzene: ");
+    lcd.print(benzene_ppm, 1);
+    lcd.print(" ppm");
+
+   /* lcd.setCursor(0, 1);
+    if (co2_ppm < 5000 && so2_ppm < 200 && co_ppm < 50 && nh3_ppm < 200 && benzene_ppm < 100) {
+        lcd.print("Air Quality: OK");
+    } else {
+        lcd.print("Air Quality: BAD");
+    } */
+    delay(3000);
+}
+
+void setup() {
+    Serial.begin(115200);
+    Blynk.begin(auth, ssid, pass);
+    dht.begin();
+
+    lcd.begin(16, 2);
+    lcd.createChar(1, degree_symbol);  
+    lcd.setCursor(3, 0);
+    lcd.print("Air Quality");
+    lcd.setCursor(3, 1);
+    lcd.print("Monitoring");
+    delay(2000);
+    lcd.clear();
+
+    if (!bmp.begin()) {
+        Serial.println("BMP180 sensor not found.");
+        while (1);  
+    }
+
+    // Initialize time synchronization
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+    timer.setInterval(10000L, sendSensorData);
+}
+
+
+void loop() {
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    float pressure = bmp.readPressure() / 100.0;
+    int gasValue = analogRead(gasPin);
+    String currentTime = getCurrentTime();
+
+    // Apply calibration formulas
+    float co2_ppm = calculatePPM(gasValue, CO2_SLOPE, CO2_INTERCEPT);
+    float so2_ppm = calculatePPM(gasValue, SO2_SLOPE, SO2_INTERCEPT);
+    float co_ppm = calculatePPM(gasValue, CO_SLOPE, CO_INTERCEPT);
+    float nh3_ppm = calculatePPM(gasValue, NH3_SLOPE, NH3_INTERCEPT);
+    float benzene_ppm = calculatePPM(gasValue, BENZENE_SLOPE, BENZENE_INTERCEPT);
+
+    // Example pollutant concentrations in ppm (replace with sensor readings)
+    float SO2 = so2_ppm;       // in ppm
+    float NH3 = nh3_ppm;       // in ppm
+    float Benzene = benzene_ppm;   // in ppm
+    float CO2 = co2_ppm;       // in ppm
+
+    // Calculate individual AQIs
+    int AQI_SO2 = calculateAQI(SO2, SO2_Breakpoints, sizeof(SO2_Breakpoints) / sizeof(AQIBreakpoint));
+    int AQI_NH3 = calculateAQI(NH3, NH3_Breakpoints, sizeof(NH3_Breakpoints) / sizeof(AQIBreakpoint));
+    int AQI_Benzene = calculateAQI(Benzene, Benzene_Breakpoints, sizeof(Benzene_Breakpoints) / sizeof(AQIBreakpoint));
+    int AQI_CO2 = calculateAQI(CO2, CO2_Breakpoints, sizeof(CO2_Breakpoints) / sizeof(AQIBreakpoint));
+
+    // Overall AQI is the maximum of individual AQIs
+    int overallAQI =  max(max(AQI_SO2, AQI_NH3), max(AQI_Benzene, AQI_CO2));
+
+    Serial.print("Time: ");
+    Serial.print(currentTime);
+    Serial.print(" ");
+    Serial.print("Temp(°C): ");
+    Serial.print(temperature);
+    Serial.print(" HUM(%): ");
+    Serial.print(humidity);
+    Serial.print(" CO2(PPM): ");
+    Serial.print(co2_ppm);
+    Serial.print(" SO2(PPM): ");
+    Serial.print(so2_ppm);
+    Serial.print(" CO(PPM): ");
+    Serial.print(co_ppm);
+    Serial.print(" NH3(PPM): ");
+    Serial.print(nh3_ppm);
+    Serial.print(" BENZENE(PPM): ");
+    Serial.print(benzene_ppm);
+    Serial.print(" Pressure(hpa): ");
+    Serial.print(pressure);
+    Serial.print(" Overall AQI:");
+    Serial.println(overallAQI);
+   // Serial.println(co2_ppm < 5000 ? "Air Quality: GOOD" : "Air Quality: BAD");
+
+    delay(1000);
+    Blynk.run();  
+    timer.run();  
+}
